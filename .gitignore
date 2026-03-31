@@ -12,7 +12,7 @@
 
 # test dirs
 input/
-outpu/
+output/
 
 # default haskel ignores
 dist

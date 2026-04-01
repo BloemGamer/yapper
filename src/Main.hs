@@ -59,9 +59,8 @@ data Definition
     | DToken
     | DLiteral
     | DStartWith
-    | Comment
-    | Macro
-    | StartWith
+    | DComment
+    | DMacro
     deriving (Show)
 
 data Modifier = MCallFunc | MType | MReserved | MRegex deriving (Show)
@@ -135,7 +134,7 @@ tokenize' pos (c : cs) macros
          in case parseDefinition name of
                 Right def ->
                     case def of
-                        Macro ->
+                        DMacro ->
                             case parseMacroDefinition restTrimmed of
                                 Left err -> Left (lexError pos err)
                                 Right ((macroName, macroBody), restInput) ->
@@ -244,9 +243,9 @@ parseDefinition str =
         "token" -> Right DToken
         "literal" -> Right DLiteral
         "startwith" -> Right DStartWith
-        "comment" -> Right Comment
-        "macro" -> Right Macro
-        "start_with" -> Right StartWith
+        "comment" -> Right DComment
+        "macro" -> Right DMacro
+        "start_with" -> Right DStartWith
         _ -> Left ("Unknown definition @" ++ str)
 
 parseModifier :: String -> Either String Modifier

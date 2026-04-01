@@ -64,7 +64,7 @@ data Definition
     | StartWith
     deriving (Show)
 
-data Modifier = MCallFunc | MType | MReserved deriving (Show)
+data Modifier = MCallFunc | MType | MReserved | MRegex deriving (Show)
 
 data TokenType
     = TNumber Int
@@ -88,6 +88,10 @@ data TokenType
     | TMinus
     | TArrow
     | TSlash
+    | TOr
+    | TBinOr
+    | TAnd
+    | TBinAnd
     | TEOF
     deriving (Show)
 
@@ -216,6 +220,16 @@ tokenize' pos (c : cs) macros
                         [] -> tokenize' newPos [] macros
                         (_ : rest'') -> tokenize' (advance newPos '\n') rest'' macros
             _ -> single TSlash
+        '|' -> case cs of
+            ('|' : rest) ->
+                let endPos = advanceMany pos "||"
+                 in (Token TOr (Span pos endPos Original) :) <$> tokenize' endPos rest macros
+            _ -> single TBinOr
+        '&' -> case cs of
+            ('&' : rest) ->
+                let endPos = advanceMany pos "||"
+                 in (Token TAnd (Span pos endPos Original) :) <$> tokenize' endPos rest macros
+            _ -> single TBinAnd
         _ -> Left (lexError pos ("Unknown character '" ++ [c] ++ "'"))
   where
     single t =
@@ -241,6 +255,7 @@ parseModifier str =
         "call_func" -> Right MCallFunc
         "type" -> Right MType
         "reserved" -> Right MReserved
+        "regex" -> Right MRegex
         _ -> Left ("Unknown definition %" ++ str)
 
 isIdentChar :: Char -> Bool

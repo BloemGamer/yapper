@@ -9,6 +9,7 @@
 .clang-format
 .clang-tidy
 .nvim.lua
+tmux.sh
 
 # test dirs
 input/

@@ -3,311 +3,328 @@ module Main where
 import Data.Char (isAlpha, isAlphaNum, isDigit, isSpace)
 import qualified Data.Map as Map
 
+data Position = Position
+    { line :: Int
+    , column :: Int
+    , offset :: Int
+    }
+    deriving (Show, Eq)
+
+data Span = Span
+    { start :: Position
+    , end :: Position
+    , origin :: Origin
+    }
+    deriving (Show, Eq)
+
+data Origin
+    = Original
+    | MacroExpansion String Span
+    deriving (Show, Eq)
+
+advance :: Position -> Char -> Position
+advance pos c =
+    case c of
+        '\n' -> Position (line pos + 1) 1 (offset pos + 1)
+        _ -> Position (line pos) (column pos + 1) (offset pos + 1)
+
+advanceMany :: Position -> String -> Position
+advanceMany = foldl advance
+
+data ErrorType
+    = LexError
+    | ParseError
+    | SemanticError
+    deriving (Show)
+
+data CompileError = CompileError
+    { errType :: ErrorType
+    , errMsg :: String
+    , errSpan :: Span
+    }
+    deriving (Show)
+
+lexError :: Position -> String -> CompileError
+lexError pos msg =
+    CompileError LexError msg (Span pos pos Original)
+
+withOrigin :: Origin -> Span -> Span
+withOrigin o sp = sp{origin = o}
+
 type MacroTable = Map.Map String String
 
 data Definition
-  = DKeyword
-  | DIgnore
-  | DToken
-  | DLiteral
-  | DStartWith
-  | Comment
-  | Macro
-  | StartWith
-  deriving (Show)
+    = DKeyword
+    | DIgnore
+    | DToken
+    | DLiteral
+    | DStartWith
+    | Comment
+    | Macro
+    | StartWith
+    deriving (Show)
 
-data Modifier = MCallFunc | MType deriving (Show)
+data Modifier = MCallFunc | MType | MReserved deriving (Show)
 
 data TokenType
-  = TNumber Int
-  | TString String
-  | TDefinition Definition
-  | TIdent String
-  | TChar String
-  | TModifier Modifier
-  | TMacro String
-  | TBraceOpen
-  | TBraceClose
-  | TParanOpen
-  | TParanClose
-  | TColon
-  | TSemicolon
-  | TComma
-  | TDot
-  | TDotDot
-  | TStar
-  | TPlus
-  | TMinus
-  | TArrow
-  | TSlash
-  | TEOF
-  deriving (Show)
+    = TNumber Int
+    | TString String
+    | TDefinition Definition
+    | TIdent String
+    | TChar String
+    | TModifier Modifier
+    | TMacro String
+    | TBraceOpen
+    | TBraceClose
+    | TParanOpen
+    | TParanClose
+    | TColon
+    | TSemicolon
+    | TComma
+    | TDot
+    | TDotDot
+    | TStar
+    | TPlus
+    | TMinus
+    | TArrow
+    | TSlash
+    | TEOF
+    deriving (Show)
 
-data Token = Token {token_type :: TokenType, token_span :: (Int, Int)} deriving (Show)
+data Token = Token
+    { token_type :: TokenType
+    , token_span :: Span
+    }
+    deriving (Show)
 
 main :: IO ()
 main = do
-  contents <- readFile "input/lex.yapper"
-  putStrLn contents
-  case tokenize contents of
-    Left err -> putStrLn ("Error: " ++ err)
-    Right tokens -> mapM_ print tokens
-  writeFile "output/lexer.h" contents
+    contents <- readFile "input/lex.yapper"
+    case tokenize contents of
+        Left err -> putStrLn (prettyError contents err)
+        Right tokens -> mapM_ print tokens
 
-tokenize :: String -> Either String [Token]
-tokenize input = tokenize' 0 input Map.empty -- start with empty macro table
+tokenize :: String -> Either CompileError [Token]
+tokenize input = tokenize' (Position 1 1 0) input Map.empty
 
-tokenize' :: Int -> String -> MacroTable -> Either String [Token]
+tokenize' :: Position -> String -> MacroTable -> Either CompileError [Token]
 tokenize' _ [] _ = Right []
 tokenize' pos (c : cs) macros
-  | isSpace c = tokenize' (pos + 1) cs macros
-  | isDigit c =
-      let (digits, rest) = span isDigit (c : cs)
-          len = length digits
-          num = read digits
-          token = Token (TNumber num) (pos, pos + len)
-       in do
-            rest_tokens <- tokenize' (pos + len) rest macros
-            return (token : rest_tokens)
-  | isAlpha c || c == '_' =
-      let (chars, rest) = span isIdentChar (c : cs)
-          len = length chars
-          token = Token (TIdent chars) (pos, pos + len)
-       in do
-            rest_tokens <- tokenize' (pos + len) rest macros
-            return (token : rest_tokens)
-  | c == '@' =
-      let (name, rest) = span isIdentChar cs
-          restTrimmed = dropWhile isSpace rest
-       in case parseDefinition name of
-            Right def ->
-              case def of
-                Macro ->
-                  case parseMacroDefinition restTrimmed of
-                    Left err -> Left err
-                    Right ((macroName, macroBody), restInput) ->
-                      let newMacros = Map.insert macroName macroBody macros
-                       in tokenize' (pos + length name + 1) restInput newMacros
-                _ ->
-                  let len = length name + 1
-                      token = Token (TDefinition def) (pos, pos + len)
-                   in do
-                        rest_tokens <- tokenize' (pos + len) restTrimmed macros
-                        return (token : rest_tokens)
-            Left _ ->
-              case Map.lookup name macros of
-                Nothing -> Left ("Unknown macro @" ++ name ++ " at position " ++ show pos)
-                Just body -> tokenize' pos (body ++ restTrimmed) macros
+    | isSpace c =
+        tokenize' (advance pos c) cs macros
+    | isDigit c =
+        let (digits, rest) = span isDigit (c : cs)
+            endPos = advanceMany pos digits
+            token = Token (TNumber (read digits)) (Span pos endPos Original)
+         in (token :) <$> tokenize' endPos rest macros
+    | isAlpha c || c == '_' =
+        let (chars, rest) = span isIdentChar (c : cs)
+            endPos = advanceMany pos chars
+            token = Token (TIdent chars) (Span pos endPos Original)
+         in (token :) <$> tokenize' endPos rest macros
+    | c == '@' =
+        let fullInput = c : cs
+            (name, rest) = span isIdentChar cs
+            defText = '@' : name
+            endPos = advanceMany pos defText
+            restTrimmed = dropWhile isSpace rest
+         in case parseDefinition name of
+                Right def ->
+                    case def of
+                        Macro ->
+                            case parseMacroDefinition restTrimmed of
+                                Left err -> Left (lexError pos err)
+                                Right ((macroName, macroBody), restInput) ->
+                                    let newMacros = Map.insert macroName macroBody macros
+                                        consumed = take (length fullInput - length restInput) fullInput
+                                        newPos = advanceMany pos consumed
+                                     in tokenize' newPos restInput newMacros
+                        _ ->
+                            let token = Token (TDefinition def) (Span pos endPos Original)
+                             in (token :) <$> tokenize' endPos restTrimmed macros
+                Left _ ->
+                    case Map.lookup name macros of
+                        Nothing ->
+                            let sp = Span pos endPos Original
+                             in Left (CompileError LexError ("Unknown definition " ++ defText) sp)
+                        Just body ->
+                            let newOrigin = MacroExpansion name (Span pos endPos Original)
+                             in do
+                                    tokens <- tokenize' pos body macros
+                                    let tokens' = map (\t -> t{token_span = withOrigin newOrigin (token_span t)}) tokens
+                                    restTokens <- tokenize' endPos restTrimmed macros
+                                    return (tokens' ++ restTokens)
     | c == '$' =
         let (name, rest) = span isIdentChar cs
-        in if null name
-             then Left ("Expected identifier after $ at position " ++ show pos)
-             else case Map.lookup name macros of
-                    Nothing -> Left ("Unknown macro $" ++ name ++ " at position " ++ show pos)
+            callText = '$' : name
+            endPos = advanceMany pos callText
+         in if null name
+                then Left (lexError pos "Expected identifier after '$'")
+                else case Map.lookup name macros of
+                    Nothing ->
+                        let sp = Span pos endPos Original
+                         in Left (CompileError LexError ("Unknown macro " ++ callText) sp)
                     Just body ->
-                      -- recursively tokenize the expanded macro body
-                      tokenize' pos (body ++ rest) macros
-  | c == '%' =
-      let (chars, rest) = span isIdentChar cs
-       in if null chars
-            then Left ("Expected identifier after % at position " ++ show pos)
-            else
-              let len = length chars + 1
-               in case parseModifier chars of
-                    Left err -> Left (err ++ " at position " ++ show pos)
+                        let newOrigin = MacroExpansion name (Span pos endPos Original)
+                         in do
+                                tokens <- tokenize' pos body macros
+                                let tokens' = map (\t -> t{token_span = withOrigin newOrigin (token_span t)}) tokens
+                                restTokens <- tokenize' endPos rest macros
+                                return (tokens' ++ restTokens)
+    | c == '%' =
+        let (name, rest) = span isIdentChar cs
+            modText = '%' : name
+            endPos = advanceMany pos modText
+         in if null name
+                then Left (lexError pos "Expected identifier after '%'")
+                else case parseModifier name of
+                    Left err -> Left (lexError pos err)
                     Right def ->
-                      let token = Token (TModifier def) (pos, pos + len)
-                       in do
-                            rest_tokens <- tokenize' (pos + len) rest macros
-                            return (token : rest_tokens)
-  | c == '"' = do
-      (token, restTokens) <- parseString pos cs
-      rest_tokens <- tokenize' (snd (token_span token)) restTokens macros
-      return (token : rest_tokens)
-  | c == '\'' = do
-      (token, restTokens) <- parseChar pos cs
-      rest_tokens <- tokenize' (snd (token_span token)) restTokens macros
-      return (token : rest_tokens)
-  | c == '{' =
-      let token = Token TBraceOpen (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == '}' =
-      let token = Token TBraceClose (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == '(' =
-      let token = Token TParanOpen (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == ')' =
-      let token = Token TParanClose (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == ':' =
-      let token = Token TColon (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == ';' =
-      let token = Token TSemicolon (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == ',' =
-      let token = Token TComma (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == '.' =
-      case cs of
-        ('.' : rest) ->
-          let token = Token TDotDot (pos, pos + 2)
-           in do
-                rest_tokens <- tokenize' (pos + 2) rest macros
-                return (token : rest_tokens)
-        _ ->
-          let token = Token TDot (pos, pos + 1)
-           in do
-                rest_tokens <- tokenize' (pos + 1) cs macros
-                return (token : rest_tokens)
-  | c == '*' =
-      let token = Token TStar (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == '+' =
-      let token = Token TPlus (pos, pos + 1)
-       in do
-            rest_tokens <- tokenize' (pos + 1) cs macros
-            return (token : rest_tokens)
-  | c == '-' =
-      case cs of
-        ('>' : rest) ->
-          let token = Token TArrow (pos, pos + 2)
-           in do
-                rest_tokens <- tokenize' (pos + 2) rest macros
-                return (token : rest_tokens)
-        _ ->
-          let token = Token TMinus (pos, pos + 1)
-           in do
-                rest_tokens <- tokenize' (pos + 1) cs macros
-                return (token : rest_tokens)
-  | c == '/' =
-      case cs of
-        ('/' : rest) ->
-          let (comment, rest') = span (/= '\n') rest
-              len = length comment + 2
-           in case rest' of
-                [] ->
-                  tokenize' (pos + len) [] macros
-                (_ : rest'') ->
-                  tokenize' (pos + len + 1) rest'' macros
-        _ ->
-          let token = Token TSlash (pos, pos + 1)
-           in do
-                rest_tokens <- tokenize' (pos + 1) cs macros
-                return (token : rest_tokens)
-  | otherwise =
-      Left ("Unknown character |" ++ [c] ++ "| at position " ++ show pos)
+                        let token = Token (TModifier def) (Span pos endPos Original)
+                         in (token :) <$> tokenize' endPos rest macros
+    | c == '"' = do
+        (token, restTokens, newPos) <- parseString pos cs
+        (token :) <$> tokenize' newPos restTokens macros
+    | c == '\'' = do
+        (token, restTokens, newPos) <- parseChar pos cs
+        (token :) <$> tokenize' newPos restTokens macros
+    | otherwise = case c of
+        '{' -> single TBraceOpen
+        '}' -> single TBraceClose
+        '(' -> single TParanOpen
+        ')' -> single TParanClose
+        ':' -> single TColon
+        ';' -> single TSemicolon
+        ',' -> single TComma
+        '.' -> case cs of
+            ('.' : rest) ->
+                let endPos = advanceMany pos ".."
+                 in (Token TDotDot (Span pos endPos Original) :) <$> tokenize' endPos rest macros
+            _ -> single TDot
+        '*' -> single TStar
+        '+' -> single TPlus
+        '-' -> case cs of
+            ('>' : rest) ->
+                let endPos = advanceMany pos "->"
+                 in (Token TArrow (Span pos endPos Original) :) <$> tokenize' endPos rest macros
+            _ -> single TMinus
+        '/' -> case cs of
+            ('/' : rest) ->
+                let (comment, rest') = span (/= '\n') rest
+                    newPos = advanceMany pos ("//" ++ comment)
+                 in case rest' of
+                        [] -> tokenize' newPos [] macros
+                        (_ : rest'') -> tokenize' (advance newPos '\n') rest'' macros
+            _ -> single TSlash
+        _ -> Left (lexError pos ("Unknown character '" ++ [c] ++ "'"))
+  where
+    single t =
+        let newPos = advance pos c
+         in (Token t (Span pos newPos Original) :) <$> tokenize' newPos cs macros
 
 parseDefinition :: String -> Either String Definition
 parseDefinition str =
-  case str of
-    "keyword" -> Right DKeyword
-    "ignore" -> Right DIgnore
-    "token" -> Right DToken
-    "literal" -> Right DLiteral
-    "startwith" -> Right DStartWith
-    "comment" -> Right Comment
-    "macro" -> Right Macro
-    "start_with" -> Right StartWith
-    _ -> Left ("Unknown definition @" ++ str)
+    case str of
+        "keyword" -> Right DKeyword
+        "ignore" -> Right DIgnore
+        "token" -> Right DToken
+        "literal" -> Right DLiteral
+        "startwith" -> Right DStartWith
+        "comment" -> Right Comment
+        "macro" -> Right Macro
+        "start_with" -> Right StartWith
+        _ -> Left ("Unknown definition @" ++ str)
 
 parseModifier :: String -> Either String Modifier
 parseModifier str =
-  case str of
-    "call_func" -> Right MCallFunc
-    "type" -> Right MType
-    _ -> Left ("Unknown definition %" ++ str)
-
-parseString :: Int -> String -> Either String (Token, String)
-parseString pos cs = go pos [] cs
-  where
-    go p acc [] = Left ("Unterminated string starting at position " ++ show pos)
-    go p acc ('"' : rest) = Right (Token (TString (reverse acc)) (pos, p + 1), rest)
-    go p acc ('\\' : c : rest) = go (p + 2) (translateEscape c : acc) rest
-    go p acc (c : rest) = go (p + 1) (c : acc) rest
-
-    translateEscape c = case c of
-      'n' -> '\n'
-      't' -> '\t'
-      '\\' -> '\\'
-      '"' -> '"'
-      '\'' -> '\''
-      _ -> c
-
-parseChar :: Int -> String -> Either String (Token, String)
-parseChar startPos input = go (startPos + 1) [] input
-  where
-    go pos acc [] = Left ("Unterminated char starting at position " ++ show startPos)
-    go pos acc ('\'' : rest) =
-      let len = pos - startPos + 1
-       in if length acc /= 1
-            then Left ("Char literal must be exactly one character at position " ++ show startPos)
-            else Right (Token (TChar (head acc : [])) (startPos, startPos + len), rest)
-    go pos acc ('\\' : c : rest) = go (pos + 2) (translateEscape c : acc) rest
-    go pos acc (c : rest) = go (pos + 1) (c : acc) rest
-
-    translateEscape c = case c of
-      'n' -> '\n'
-      't' -> '\t'
-      '\\' -> '\\'
-      '"' -> '"'
-      '\'' -> '\''
-      _ -> c
+    case str of
+        "call_func" -> Right MCallFunc
+        "type" -> Right MType
+        "reserved" -> Right MReserved
+        _ -> Left ("Unknown definition %" ++ str)
 
 isIdentChar :: Char -> Bool
 isIdentChar c = isAlphaNum c || c == '_'
 
+parseString ::
+    Position ->
+    String ->
+    Either CompileError (Token, String, Position)
+parseString startPos = go (advance startPos '"') []
+  where
+    go _ _ [] =
+        Left (lexError startPos "Unterminated string")
+    go pos acc ('"' : rest) =
+        let endPos = advance pos '"'
+         in Right (Token (TString (reverse acc)) (Span startPos endPos Original), rest, endPos)
+    go pos acc ('\\' : c : rest) =
+        let pos' = advance (advance pos '\\') c
+         in go pos' (translateEscape c : acc) rest
+    go pos acc (c : rest) =
+        go (advance pos c) (c : acc) rest
+
+parseChar ::
+    Position ->
+    String ->
+    Either CompileError (Token, String, Position)
+parseChar startPos = go (advance startPos '\'') []
+  where
+    go _ _ [] =
+        Left (lexError startPos "Unterminated char literal")
+    go pos acc ('\'' : rest)
+        | length acc /= 1 =
+            Left (lexError startPos "Char literal must be exactly one character")
+        | otherwise =
+            let endPos = advance pos '\''
+             in Right (Token (TChar acc) (Span startPos endPos Original), rest, endPos)
+    go pos _ ('\\' : c : rest) =
+        let pos' = advance (advance pos '\\') c
+         in go pos' [translateEscape c] rest
+    go pos _ (c : rest) =
+        go (advance pos c) [c] rest
+
+translateEscape :: Char -> Char
+translateEscape c =
+    case c of
+        'n' -> '\n'
+        't' -> '\t'
+        '\\' -> '\\'
+        '"' -> '"'
+        '\'' -> '\''
+        _ -> c
+
 parseMacroDefinition :: String -> Either String ((String, String), String)
 parseMacroDefinition input =
-  let trimmed = dropWhile isSpace input
-      (namePart, rest1) = span isIdentChar trimmed
-      restBody = dropWhile isSpace rest1
-   in if null namePart
-        then Left "Expected macro name after @macro"
-        else
-          let (bodyLines, restInput) = grabMacroBody restBody
-           in Right ((namePart, bodyLines), restInput)
+    let trimmed = dropWhile isSpace input
+        (namePart, rest1) = span isIdentChar trimmed
+        restBody = dropWhile isSpace rest1
+     in if null namePart
+            then Left "Expected macro name after @macro"
+            else
+                let (bodyLines, restInput) = grabMacroBody restBody
+                 in Right ((namePart, bodyLines), restInput)
 
 grabMacroBody :: String -> (String, String)
-grabMacroBody input = go input ""
-  where
-    go [] acc = (acc, [])
-    go s acc =
-      let (line, rest) = break (== '\n') s
-       in if not (null line) && last line == '\\'
-            then go (drop 1 rest) (acc ++ init line ++ "\n") -- remove trailing '\'
-            else (acc ++ line, drop 1 rest)
+grabMacroBody input =
+    let (body, rest) = break (== '\n') input
+     in (body, drop 1 rest)
 
-expandMacro :: MacroTable -> String -> Either String String
-expandMacro macros name =
-  case Map.lookup name macros of
-    Just val -> tokenizeMacros macros val -- recursively expand any nested macros
-    Nothing -> Left ("Unknown macro @" ++ name)
-
-tokenizeMacros :: MacroTable -> String -> Either String String
-tokenizeMacros macros input = go input ""
-  where
-    go [] acc = Right acc
-    go ('@' : rest) acc =
-      let (name, rest') = span isIdentChar rest
-       in case Map.lookup name macros of
-            Nothing -> Left ("Unknown macro @" ++ name)
-            Just val -> go rest' (acc ++ val)
-    go (c : rest) acc = go rest (acc ++ [c])
+prettyError :: String -> CompileError -> String
+prettyError src err =
+    let Span (Position l cStart _) (Position _ cEnd _) _ = errSpan err
+        ls = lines src
+        lineText =
+            if l <= length ls then ls !! (l - 1) else ""
+        width = max 1 (cEnd - cStart)
+     in show (errType err)
+            ++ " at "
+            ++ show l
+            ++ ":"
+            ++ show cStart
+            ++ "\n"
+            ++ lineText
+            ++ "\n"
+            ++ replicate (cStart - 1) ' '
+            ++ replicate width '^'
+            ++ "\n"
+            ++ errMsg err

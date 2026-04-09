@@ -1,0 +1,13 @@
+unstable_features = true
+
+
+# Tabs and indentation
+hard_tabs = true
+tab_spaces = 4
+
+# Line width
+max_width = 120
+
+# Brace style
+brace_style = "AlwaysNextLine"
+control_brace_style = "AlwaysSameLine"

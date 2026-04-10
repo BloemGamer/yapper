@@ -321,15 +321,15 @@ fn emit_types(out: &mut String, defs: &[TokenDef])
 		"/// Enum for the TokenKinds for the lexer
 typedef enum TokenKind {\n",
 	);
-	out.push_str("    TOKEN_KIND_INVALID = 0,\n");
+	out.push_str("\tTOKEN_KIND_INVALID = 0,\n\tTOKEN_KIND_EOF,\n");
 	for def in defs {
 		if def.ignore {
 			continue;
 		}
 		if def.reserved {
-			let _ = writeln!(out, "    TOKEN_KIND_{}, /* reserved */", name_to_enum_member(&def.name));
+			let _ = writeln!(out, "\tTOKEN_KIND_{}, /* reserved */", name_to_enum_member(&def.name));
 		} else {
-			let _ = writeln!(out, "    TOKEN_KIND_{},", name_to_enum_member(&def.name));
+			let _ = writeln!(out, "\tTOKEN_KIND_{},", name_to_enum_member(&def.name));
 		}
 	}
 	out.push_str("} TokenKind;\n\n");
@@ -373,6 +373,13 @@ typedef enum TokenKind {\n",
 	out.push_str("	Token t;\n");
 	out.push_str("	memset(&t, 0, sizeof(t));\n");
 	out.push_str("	t.kind = TOKEN_KIND_INVALID;\n");
+	out.push_str("	return t;\n");
+	out.push_str("}\n\n");
+
+	out.push_str("static inline Token token_eof(void) {\n");
+	out.push_str("	Token t;\n");
+	out.push_str("	memset(&t, 0, sizeof(t));\n");
+	out.push_str("	t.kind = TOKEN_KIND_EOF;\n");
 	out.push_str("	return t;\n");
 	out.push_str("}\n\n");
 
@@ -621,7 +628,7 @@ Token next_token(SliceString* str, size_t* offset)
 {
 	for (;;) {
 		if (str->len == 0) {
-			return token_invalid();
+			return token_eof();
 		}
 
 		const char* src = str->data;

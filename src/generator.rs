@@ -85,7 +85,7 @@ extern "C" {{
 	writeln!(
 		out,
 		r#"
-Token next_token(SliceString* str, size_t *offset);
+Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col);
 #ifdef YAPPER_LEXER_IMPLEMENTATION"#
 	)
 	.unwrap();
@@ -304,6 +304,10 @@ typedef struct Span {
 	size_t start;
 	/// length in bytes
 	size_t len;
+	/// 1-based line number of the start of the token
+	size_t line;
+	/// 1-based column (character) number of the start of the token
+	size_t col;
 } Span;
 
 "#,
@@ -340,7 +344,7 @@ typedef enum TokenKind {\n",
 	out.push_str(
 		"/// Struct of the token
 /// @member kind -> the TokenKind of the token
-/// @member span -> the Span of where the token in located in the file
+/// @member span -> the Span of where the token is located in the file (start, end, line, col)
 		typedef struct Token {\n",
 	);
 	out.push_str("	TokenKind kind;\n");
@@ -422,10 +426,10 @@ typedef enum TokenKind {\n",
 	out.push_str(
 		r#"static inline void token_print(const char* src, Token tok)
 {
-	printf("%s[@%zu:%zu] \"%.*s\"\n",
+	printf("%s[%zu:%zu] \"%.*s\"\n",
 		token_kind_name(tok.kind),
-		tok.span.start,
-		tok.span.len,
+		tok.span.line,
+		tok.span.col,
 		(int)tok.span.len,
 		src + tok.span.start
 	);
@@ -615,6 +619,8 @@ fn emit_next_token(out: &mut String, defs: &[TokenDef])
  *
  * str    — remaining source text (passed by value; caller must advance it)
  * offset — absolute byte offset of str.data from the start of the file
+ * line   — current 1-based line number (updated in place)
+ * col    — current 1-based column number (updated in place)
  *
  * Definitions with %call_func delegate token construction entirely to the
  * user function: next_token calls fn(str, args...) and returns its result.
@@ -624,7 +630,7 @@ fn emit_next_token(out: &mut String, defs: &[TokenDef])
  *
  * Returns TOKEN_KIND_INVALID when str is empty or no rule matched.
  * --------------------------------------------------------------------------*/
-Token next_token(SliceString* str, size_t* offset)
+Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col)
 {
 	for (;;) {
 		if (str->len == 0) {
@@ -645,7 +651,6 @@ Token next_token(SliceString* str, size_t* offset)
 		let n = def.dfa.states.len();
 		let pfx = name_to_c_ident(&def.name);
 		let kind_enum = format!("TOKEN_KIND_{}", name_to_enum_member(&def.name));
-		// Until-based tokens stop at first accept so the terminator isn't re-consumed
 		let first_accept = if def.has_until { 1 } else { 0 };
 
 		let _ = writeln!(out, "		/* --- {} --- */", def.name);
@@ -673,23 +678,26 @@ Token next_token(SliceString* str, size_t* offset)
 		);
 	}
 
-	let _ = write!(
-		out,
+	out.push_str(
 		r#"
-		if (best_len <= 0) {{
+		if (best_len <= 0) {
 			return token_invalid(); /* no rule matched */
-		}}
+		}
 
 		/* advance the input past the match */
 		str->data += best_len;
 		str->len  -= (size_t)best_len;
 		*offset   += (size_t)best_len;
 
-		if (best_is_ignore) {{
-			continue; /* silently skip and retry */
-		}}
+		if (best_is_ignore) {
+			for (ptrdiff_t i = 0; i < best_len; i++) {
+				if (src[i] == '\n') { (*line)++; *col = 1; }
+				else                { (*col)++; }
+			}
+			continue;
+		}
 
-		switch ((TokenKind)best_kind) {{
+		switch ((TokenKind)best_kind) {
 "#,
 	);
 
@@ -727,7 +735,14 @@ Token next_token(SliceString* str, size_t* offset)
      \t\t\tconst char* before = str->data;\n\
      {matched_decl}\
      \t\t\tToken tok = {call_str};\n\
-     \t\t\ttok.span.start += *offset - (size_t)best_len;\n\
+     \t\t\ttok.span.start = *offset - (size_t)best_len;\n\
+     \t\t\ttok.span.len   = (size_t)best_len;\n\
+     \t\t\ttok.span.line  = *line;\n\
+     \t\t\ttok.span.col   = *col;\n\
+     \t\t\tfor (ptrdiff_t i = 0; i < best_len; i++) {{\n\
+     \t\t\t\tif (src[i] == '\\n') {{ (*line)++; *col = 1; }}\n\
+     \t\t\t\telse                {{ (*col)++; }}\n\
+     \t\t\t}}\n\
      \t\t\t*offset += (size_t)(str->data - before);\n\
      \t\t\treturn tok;\n\
      \t\t}}"
@@ -742,6 +757,12 @@ Token next_token(SliceString* str, size_t* offset)
                      \t\t\ttok.kind       = {kind_enum};\n\
                      \t\t\ttok.span.start = *offset - (size_t)best_len;\n\
                      \t\t\ttok.span.len   = (size_t)best_len;\n\
+                     \t\t\ttok.span.line  = *line;\n\
+                     \t\t\ttok.span.col   = *col;\n\
+                     \t\t\tfor (ptrdiff_t i = 0; i < best_len; i++) {{\n\
+                     \t\t\t\tif (src[i] == '\\n') {{ (*line)++; *col = 1; }}\n\
+                     \t\t\t\telse                {{ (*col)++; }}\n\
+                     \t\t\t}}\n\
                      \t\t\treturn tok;\n\
                      \t\t}}"
 				);

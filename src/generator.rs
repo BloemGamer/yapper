@@ -723,7 +723,12 @@ Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col)
 	out.push_str(
 		r#"
 		if (best_len <= 0) {
-			return token_invalid(); /* no rule matched */
+			Token tok = token_invalid();
+			tok.span.start = *offset;
+			tok.span.len   = 0;
+			tok.span.line  = *line;
+			tok.span.col   = *col;
+			return tok;
 		}
 
 		/* advance the input past the match */
@@ -774,20 +779,22 @@ Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col)
 				let _ = writeln!(
 					out,
 					"		case {kind_enum}: {{\n\
-     \t\t\tconst char* before = str->data;\n\
-     {matched_decl}\
-     \t\t\tToken tok = {call_str};\n\
-     \t\t\ttok.span.start = *offset - (size_t)best_len;\n\
-     \t\t\ttok.span.len   = (size_t)best_len;\n\
-     \t\t\ttok.span.line  = *line;\n\
-     \t\t\ttok.span.col   = *col;\n\
-     \t\t\tfor (ptrdiff_t i = 0; i < best_len; i++) {{\n\
-     \t\t\t\tif (src[i] == '\\n') {{ (*line)++; *col = 1; }}\n\
-     \t\t\t\telse                {{ (*col)++; }}\n\
-     \t\t\t}}\n\
-     \t\t\t*offset += (size_t)(str->data - before);\n\
-     \t\t\treturn tok;\n\
-     \t\t}}"
+                     {matched_decl}\
+                     \t\t\tconst char* call_start = str->data;\n\
+                     \t\t\tToken tok = {call_str};\n\
+                     \t\t\tsize_t extra = (size_t)(str->data - call_start);\n\
+                     \t\t\tsize_t total = (size_t)best_len + extra;\n\
+                     \t\t\t*offset        += extra;\n\
+                     \t\t\ttok.span.start  = *offset - total;\n\
+                     \t\t\ttok.span.len    = total;\n\
+                     \t\t\ttok.span.line   = *line;\n\
+                     \t\t\ttok.span.col    = *col;\n\
+                     \t\t\tfor (size_t i = 0; i < total; i++) {{\n\
+                     \t\t\t\tif (src[i] == '\\n') {{ (*line)++; *col = 1; }}\n\
+                     \t\t\t\telse                {{ (*col)++; }}\n\
+                     \t\t\t}}\n\
+                     \t\t\treturn tok;\n\
+                     \t\t}}"
 				);
 			}
 			None => {
@@ -813,7 +820,13 @@ Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col)
 	}
 
 	out.push_str(
-		r#"		default: return token_invalid();
+		r#"		default: {token_invalid();
+			Token tok = token_invalid();
+			tok.span.start = *offset;
+			tok.span.len   = 0;
+			tok.span.line  = *line;
+			tok.span.col   = *col;
+			return tok;};
 		}
 	}
 }

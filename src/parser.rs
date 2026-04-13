@@ -135,10 +135,17 @@ pub enum Definition
 	{
 		func_definition: String, span: Span
 	},
-	/// `@c_type("typedef Lexer { SliceString src; size_t offset; } Lexer;")`
+	/// `@c_type("typedef struct Lexer { SliceString src; size_t offset; } Lexer;")`
 	CType
 	{
 		type_definition: String, span: Span
+	},
+	/// @custom_token(name, "struct {SliceString slice;}"?)
+	CustomToken
+	{
+		name: String,
+		ty: Option<String>,
+		span: Span,
 	},
 }
 
@@ -275,6 +282,7 @@ impl Parser
 			TokenKind::Definition(crate::lexer::Definition::Comment) => self.parse_comment(),
 			TokenKind::Definition(crate::lexer::Definition::CFunc) => self.parse_cfunc(),
 			TokenKind::Definition(crate::lexer::Definition::CType) => self.parse_ctype(),
+			TokenKind::Definition(crate::lexer::Definition::CustomToken) => self.parse_custom_token(),
 			_ => Err(ParseError::new(
 				format!(
 					"Expected a definition (@keyword, @token, etc.), got {:?}",
@@ -442,6 +450,37 @@ impl Parser
 		let span = Span::new(start.start, end.end);
 
 		Ok(Definition::CType { type_definition, span })
+	}
+
+	fn parse_custom_token(&mut self) -> PResult<Definition>
+	{
+		let start = self.span();
+		self.advance(); // consume @custom_token
+		self.expect(&TokenKind::ParenOpen)?;
+
+		let name = self.expect_ident()?;
+
+		// ty is optional — only parse it if a comma follows
+		let ty = if self.peek().kind == TokenKind::Comma {
+			self.advance(); // consume comma
+			let tok = self.advance();
+			let TokenKind::Str(type_definition) = tok.kind.clone() else {
+				return Err(ParseError {
+					message: "expected String".to_string(),
+					span: tok.span.clone(),
+				});
+			};
+			Some(type_definition)
+		} else {
+			None
+		};
+
+		self.eat_comma(); // trailing comma before ')'
+
+		let end = self.expect_span(&TokenKind::ParenClose)?;
+		let span = Span::new(start.start, end.end); // span unused in CustomToken but kept for consistency
+
+		Ok(Definition::CustomToken { name, ty, span })
 	}
 
 	fn parse_modifiers(&mut self) -> PResult<Vec<ModifierAst>>

@@ -47,6 +47,7 @@ pub struct TokenDef
 	/// These tokens must use first-accept (not longest-accept) DFA simulation
 	/// so that e.g. `"//" -> '\n'` stops at the very first newline, not the last.
 	pub has_until: bool,
+	pub custom_type: Option<String>,
 }
 
 pub enum TokenKind
@@ -185,6 +186,24 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 			}
 			Definition::CFunc { .. } => {}
 			Definition::CType { .. } => {}
+			Definition::CustomToken { name, ty, .. } => {
+				let uname = unique_name(name, &mut seen);
+				result.push(TokenDef {
+					name: uname,
+					dfa: crate::dfa::DFA {
+						states: vec![],
+						start: 0,
+					}, // no DFA needed
+					kind: TokenKind::Token,
+					pattern_labels: vec![],
+					slice: None,
+					call_func: None,
+					ignore: false,
+					reserved: false,
+					has_until: false,
+					custom_type: ty.clone(),
+				});
+			}
 		}
 	}
 	result
@@ -224,6 +243,7 @@ fn compile_def(name: &str, pattern: &Pattern, modifiers: &[ModifierAst], kind: T
 		ignore: false,
 		reserved,
 		has_until,
+		custom_type: None,
 	}
 }
 
@@ -340,6 +360,7 @@ typedef enum TokenKind {\n",
 
 	// ── Token struct ──────────────────────────────────────────────────────────
 	let defs_with_slice: Vec<&TokenDef> = defs.iter().filter(|d| !d.ignore && d.slice.is_some()).collect();
+	let custom_defs: Vec<&TokenDef> = defs.iter().filter(|d| !d.ignore && d.custom_type.is_some()).collect();
 
 	out.push_str(
 		"/// Struct of the token
@@ -350,8 +371,9 @@ typedef enum TokenKind {\n",
 	out.push_str("	TokenKind kind;\n");
 	out.push_str("	/// byte offset + length in source file\n	Span      span;\n");
 
-	if !defs_with_slice.is_empty() {
+	if !defs_with_slice.is_empty() || !custom_defs.is_empty() {
 		out.push_str("	union {\n");
+
 		for def in &defs_with_slice {
 			let field_name = match &def.slice {
 				Some(None) => "slice".to_string(),
@@ -367,6 +389,20 @@ typedef enum TokenKind {\n",
 				name_to_enum_member(&def.name)
 			);
 		}
+
+		for def in &custom_defs {
+			let field_name = name_to_struct_member(&def.name);
+			let ty = def.custom_type.as_deref().unwrap();
+			let _ = writeln!(out, "		struct {{");
+			let _ = writeln!(out, "			{} {};", ty, field_name);
+			let _ = writeln!(
+				out,
+				"		}} {}; /* TOKEN_KIND_{} */",
+				field_name,
+				name_to_enum_member(&def.name)
+			);
+		}
+
 		out.push_str("	} slices;\n");
 	}
 
@@ -610,7 +646,7 @@ static ptrdiff_t dfa_run(
 
 fn emit_next_token(out: &mut String, defs: &[TokenDef])
 {
-	let normal_defs: Vec<&TokenDef> = defs.iter().filter(|d| !d.ignore).collect();
+	let normal_defs: Vec<&TokenDef> = defs.iter().filter(|d| !d.ignore && d.custom_type.is_none()).collect();
 	let ignore_defs: Vec<&TokenDef> = defs.iter().filter(|d| d.ignore).collect();
 
 	out.push_str(
@@ -627,6 +663,9 @@ fn emit_next_token(out: &mut String, defs: &[TokenDef])
  * The user function is responsible for filling in tok.span.
  *
  * Definitions without %call_func have their Token built here automatically.
+ *
+ * Custom tokens (@custom_token) are never produced by the lexer automatically;
+ * they are emitted only by user code via %call_func.
  *
  * Returns TOKEN_KIND_INVALID when str is empty or no rule matched.
  * --------------------------------------------------------------------------*/

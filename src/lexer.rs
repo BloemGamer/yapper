@@ -18,6 +18,7 @@ pub enum Definition
 	Macro,
 	CFunc,
 	CType,
+	CustomToken,
 }
 
 impl Definition
@@ -34,6 +35,7 @@ impl Definition
 			"macro" => Some(Self::Macro),
 			"c_func" => Some(Self::CFunc),
 			"c_type" => Some(Self::CType),
+			"custom_token" => Some(Self::CustomToken),
 			_ => None,
 		}
 	}

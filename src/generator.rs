@@ -510,6 +510,9 @@ fn emit_tables(out: &mut String, defs: &[TokenDef])
 	for def in defs {
 		let dfa = &def.dfa;
 		let n = dfa.states.len();
+		if n == 0 {
+			continue;
+		}
 		let pfx = name_to_c_ident(&def.name);
 
 		let _ = writeln!(out, "/* DFA tables for '{}' ({} states) */", def.name, n);

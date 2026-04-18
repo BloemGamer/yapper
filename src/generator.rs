@@ -63,6 +63,16 @@ pub enum TokenKind
 
 pub fn generate(defs: &[Definition]) -> String
 {
+	let errors = validate_duplicate_names(defs);
+	if !errors.is_empty() {
+		// surface all problems at once rather than stopping at the first
+		panic!(
+			"Yapper: {} validation error(s):\n{}",
+			errors.len(),
+			errors.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n")
+		);
+	}
+
 	let token_defs = collect_token_defs(defs);
 	let raw_c = collect_raw_c(defs);
 
@@ -107,16 +117,15 @@ Token next_token(SliceString* str, size_t* offset, size_t* line, size_t* col);
 
 // ── pass 1: collect ───────────────────────────────────────────────────────────
 
-fn unique_name(name: &str, seen: &mut HashMap<String, usize>) -> String
+fn aleady_seen(name: &str, seen: &mut HashMap<String, bool>) -> bool
 {
-	let count = seen.entry(name.to_string()).or_insert(0);
-	let unique = if *count == 0 {
-		name.to_string()
+	let already_seen = seen.entry(name.to_string()).or_insert(false);
+	if !*already_seen {
+		*already_seen = true;
+		return false;
 	} else {
-		format!("{}_{}", name, count)
+		return true;
 	};
-	*count += 1;
-	unique
 }
 
 fn collect_raw_c(defs: &[Definition]) -> RawC
@@ -136,7 +145,7 @@ fn collect_raw_c(defs: &[Definition]) -> RawC
 fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 {
 	let mut result = Vec::new();
-	let mut seen: HashMap<String, usize> = HashMap::new();
+	let mut seen: HashMap<String, bool> = HashMap::new();
 	let mut ignore_idx: usize = 0;
 
 	for def in defs {
@@ -147,8 +156,10 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 				modifiers,
 				..
 			} => {
-				let uname = unique_name(name, &mut seen);
-				result.push(compile_def(&uname, pattern, modifiers, TokenKind::Keyword));
+				let seen = aleady_seen(name, &mut seen);
+				if !seen {
+					result.push(compile_def(name, pattern, modifiers, TokenKind::Keyword));
+				}
 			}
 			Definition::Token {
 				name,
@@ -156,8 +167,10 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 				modifiers,
 				..
 			} => {
-				let uname = unique_name(name, &mut seen);
-				result.push(compile_def(&uname, pattern, modifiers, TokenKind::Token));
+				let seen = aleady_seen(name, &mut seen);
+				if !seen {
+					result.push(compile_def(name, pattern, modifiers, TokenKind::Token));
+				}
 			}
 			Definition::Literal {
 				name,
@@ -165,8 +178,10 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 				modifiers,
 				..
 			} => {
-				let uname = unique_name(name, &mut seen);
-				result.push(compile_def(&uname, pattern, modifiers, TokenKind::Literal));
+				let seen = aleady_seen(name, &mut seen);
+				if !seen {
+					result.push(compile_def(name, pattern, modifiers, TokenKind::Literal));
+				}
 			}
 			Definition::Comment {
 				name,
@@ -174,8 +189,10 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 				modifiers,
 				..
 			} => {
-				let uname = unique_name(name, &mut seen);
-				result.push(compile_def(&uname, pattern, modifiers, TokenKind::Comment));
+				let seen = aleady_seen(name, &mut seen);
+				if !seen {
+					result.push(compile_def(name, pattern, modifiers, TokenKind::Comment));
+				}
 			}
 			Definition::Ignore { pattern, .. } => {
 				let name = format!("ignore_{}", ignore_idx);
@@ -187,22 +204,24 @@ fn collect_token_defs(defs: &[Definition]) -> Vec<TokenDef>
 			Definition::CFunc { .. } => {}
 			Definition::CType { .. } => {}
 			Definition::CustomToken { name, ty, .. } => {
-				let uname = unique_name(name, &mut seen);
-				result.push(TokenDef {
-					name: uname,
-					dfa: crate::dfa::DFA {
-						states: vec![],
-						start: 0,
-					}, // no DFA needed
-					kind: TokenKind::Token,
-					pattern_labels: vec![],
-					slice: None,
-					call_func: None,
-					ignore: false,
-					reserved: false,
-					has_until: false,
-					custom_type: ty.clone(),
-				});
+				let seen = aleady_seen(name, &mut seen);
+				if !seen {
+					result.push(TokenDef {
+						name: name.clone(),
+						dfa: crate::dfa::DFA {
+							states: vec![],
+							start: 0,
+						}, // no DFA needed
+						kind: TokenKind::Token,
+						pattern_labels: vec![],
+						slice: None,
+						call_func: None,
+						ignore: false,
+						reserved: false,
+						has_until: false,
+						custom_type: ty.clone(),
+					});
+				}
 			}
 		}
 	}
@@ -849,4 +868,96 @@ fn emit_raw_c_funcs(out: &mut String, raw_c: &RawC)
 		out.push_str(func);
 		out.push_str("\n\n");
 	}
+}
+
+// ── validation helpers ────────────────────────────────────────────────────────
+
+fn token_kind_label(def: &Definition) -> &'static str
+{
+	match def {
+		Definition::Keyword { .. } => "keyword",
+		Definition::Token { .. } => "token",
+		Definition::Literal { .. } => "literal",
+		Definition::Comment { .. } => "comment",
+		Definition::Ignore { .. } => "ignore",
+		Definition::CFunc { .. } => "cfunc",
+		Definition::CType { .. } => "ctype",
+		Definition::CustomToken { .. } => "custom_token",
+	}
+}
+
+fn slice_shape_label(modifiers: &[ModifierAst]) -> String
+{
+	match modifiers.iter().find_map(|m| match m {
+		ModifierAst::Slice(label) => Some(label.clone()),
+		_ => None,
+	}) {
+		None => "no_slice".to_string(),
+		Some(None) => "slice(unnamed)".to_string(),
+		Some(Some(l)) => format!("slice({})", l),
+	}
+}
+
+/// Validate that all definitions sharing the same name agree on:
+///   1. definition kind  (keyword / token / literal / comment / …)
+///   2. slice shape      (no slice / unnamed slice / named slice "foo")
+///
+/// Returns a list of human-readable error messages (empty = all good).
+pub fn validate_duplicate_names(defs: &[Definition]) -> Vec<String>
+{
+	// name → (kind_label, slice_shape, first_occurrence_index)
+	let mut seen: HashMap<&str, (&'static str, String, usize)> = HashMap::new();
+	let mut errors: Vec<String> = Vec::new();
+
+	for (i, def) in defs.iter().enumerate() {
+		let name = match def {
+			Definition::Keyword { name, .. }
+			| Definition::Token { name, .. }
+			| Definition::Literal { name, .. }
+			| Definition::Comment { name, .. }
+			| Definition::CustomToken { name, .. } => name.as_str(),
+			// Ignore / CFunc / CType have no user-visible name — skip
+			_ => continue,
+		};
+
+		let kind = token_kind_label(def);
+		let shape = match def {
+			Definition::Keyword { modifiers, .. }
+			| Definition::Token { modifiers, .. }
+			| Definition::Literal { modifiers, .. }
+			| Definition::Comment { modifiers, .. } => slice_shape_label(modifiers),
+			Definition::CustomToken { ty, .. } => format!("custom_type({})", ty.as_deref().unwrap_or("?")),
+			_ => "no_slice".to_string(),
+		};
+
+		match seen.get(name) {
+			None => {
+				seen.insert(name, (kind, shape, i));
+			}
+			Some((prev_kind, prev_shape, prev_i)) => {
+				if *prev_kind != kind {
+					errors.push(format!(
+						"duplicate name '{}': definition #{} is a {} but definition #{} is a {}",
+						name,
+						prev_i + 1,
+						prev_kind,
+						i + 1,
+						kind
+					));
+				}
+				if prev_shape != &shape {
+					errors.push(format!(
+						"duplicate name '{}': definition #{} has output '{}' but definition #{} has '{}'",
+						name,
+						prev_i + 1,
+						prev_shape,
+						i + 1,
+						shape
+					));
+				}
+			}
+		}
+	}
+
+	errors
 }
